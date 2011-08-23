@@ -1,15 +1,15 @@
 #!/usr/bin/env python
-#
 # HTMLMinifier.py v0.2
 #
 # Python reimplementation of:
-# + HTMLMinifier.py v0.43
-#   http://kangax.github.com/html-minifier/
+# HTMLMinifier.py v0.43
+# http://kangax.github.com/html-minifier/
 #
-
+# Copyright (c) 2010 Juriy "kangax" Zaytsev
+# Licensed under the MIT license.
 
 import re
-import HTMLParser as html
+from lxml import etree
 
 class HtmlMinifier:
 
@@ -40,12 +40,12 @@ class HtmlMinifier:
 
 	# account for js + html comments (e.g.: //<!--)
 	__reStartDelimiter = {
-		'script' : re.compile(r"^\s*(?://)?\s*<!--.*\n?"),
-		'style'  : re.compile(r"^\s*<!--\s*")
+		'script' : re.compile(r"^\s*?(?://)?\s*?<!--.*?\n?"),
+		'style'  : re.compile(r"^\s*?<!--\s*?")
 	}
 	__reEndDelimiter = {
-		'script' : re.compile(r"\s*(?://)?\s*-->\s*$"),
-		'style'  : re.compile(r"\s*-->\s*$")
+		'script' : re.compile(r"\s*?(?://)?\s*?-->\s*?$"),
+		'style'  : re.compile(r"\s*?-->\s*?$")
 	}
 
 	# Possible empty attributes to remove.
@@ -166,7 +166,7 @@ class HtmlMinifier:
 
 	def __normalizeAttribute(self, curr, attrs, tag):
 		# Store the name and value of the attribute
-		(name, val) = (str(curr[0]).lower(), curr[1])
+		(name, val) = (curr.lower(), attrs[curr])
 		val = '' if val is None else val
 
 		if (self.opts['removeRedundantAttributes'] and self.__isAttributeRedundant(tag,name,val,attrs)) or \
@@ -187,7 +187,7 @@ class HtmlMinifier:
 			frag = name + '=' + val
 		return ' ' + frag
 
-	def __startTag(self, tag, attrs):
+	def start(self, tag, attrs):
 		"""
 		Deal with a starting tag.
 		"""
@@ -213,7 +213,7 @@ class HtmlMinifier:
 #	def __unaryElement(self, tag, attrs):
 #		print tag
 #
-	def __endTag(self, tag):
+	def end(self, tag):
 		if self.opts['collapseWhitespace']:
 			if len(self.__stackNoTrimWhitespace) and tag == self.__stackNoTrimWhitespace[len(self.__stackNoTrimWhitespace) - 1]:
 				self.__stackNoTrimWhitespace.pop()
@@ -227,10 +227,8 @@ class HtmlMinifier:
 			lastIndexOf = len(self.__buffer) -1 - self.__buffer.index('<')
 			self.__buffer.reverse()
 			self.__buffer = self.__buffer[lastIndexOf:]
-			print self.__buffer
 			return
 		elif self.opts['removeOptionalTags'] and self.__isOptionalTag(tag):
-			print tag
 			return
 		else:
 			self.__buffer.append('</')
@@ -242,7 +240,7 @@ class HtmlMinifier:
 		self.__buffer = []
 		self.__currentChars = ''
 
-	def __innerText(self, text):
+	def data(self, text):
 		if self.__currentTag == 'script' or self.__currentTag == 'style':
 			if self.opts['removeCommentsFromCDATA']:
 				text = self.__removeComments(text, self.__currentTag)
@@ -257,7 +255,7 @@ class HtmlMinifier:
 		self.__currentChars = text
 		self.__buffer.append(text)
 
-	def __comment(self, text):
+	def comment(self, text):
 		if self.opts['removeComments']:
 			if self.__isConditionalComment(text):
 				text = '<not --' + self.__cleanConditionalComment(text) + '-->'
@@ -268,13 +266,16 @@ class HtmlMinifier:
 		self.__buffer.append(text)
 
 	def __doctype(self, doctype):
-		self.__buffer.append('<not DOCTYPE html>' if self.opts['useShortDoctype'] else self.__collapseWhitespace(doctype))
+		self.__buffer.append('<!DOCTYPE html>' if self.opts['useShortDoctype'] else self.__collapseWhitespace(doctype))
 
 	def __cref(self, name):
 		self.__buffer.append('&#' + name + ';')
 
 	def __eref(self, name):
 		self.__buffer.append('&' + name + ';')
+
+	def close(self):
+		return ''
 
 	def minify(self, value, options=None):
 		# Set the new options.
@@ -291,24 +292,30 @@ class HtmlMinifier:
 		self.__currentChars = ''
 		self.__currentTag = ''
 
-		# Parse html.
-		#objDOM = soup.BeautifulSoup(self.__trimWhitespace(value))
-		p = html.HTMLParser()
-		p.handle_comment = self.__comment
-		p.handle_starttag = self.__startTag
-		p.handle_endtag = self.__endTag
-		p.handle_data = self.__innerText
-		p.handle_decl = self.__doctype
-		p.handle_entityref = self.__eref
-		p.handle_charref = self.__cref
-		p.feed(value)
-		p.close()
+		# Until I can figure out how to access the actual doctype string when
+		# using a custom parser..
+		self.__doctype('<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">')
+		p = etree.HTMLParser(target = self)
+		tree = etree.fromstring(value,parser=p)
 
-		# Iterate tags.
-		#for tag in objDOM.findAll(): self.__startTag(tag)
-		#self.__results.extend(self.__buffer)
+		# Iterate and add buffer to results.
 		for c in self.__buffer: self.__results.append(c)
-		results = "".join(self.__results)
+		self.__buffer = []
+
+		# Trim the remainder of the results.
+		results = []
+		for c in self.__results:
+			if re.search(r"[^\s\r\n]", c):
+				if re.search(r"^(?:[\s\r\n]+([\s]))", c):
+					c = re.sub(r"^(?:[\s\r\n]+([\s]))", r"\1", c)
+				if re.search(r"(?:([\s])[\s\r\n]+)$", c):
+					c = re.sub(r"(?:([\s])[\s\r\n]+)$", r"\1", c)
+			else:
+				if len(c) > 0:
+					c = c[0]
+			if len(c) > 0:
+				results.append(c)
+		results = "".join(results)
 		return results
 
 if __name__ == '__main__':
@@ -320,5 +327,5 @@ if __name__ == '__main__':
 		else:
 			print min.minified
 	else:
-		print 'Usage: %s input [output]'
+		print 'Usage: %s input [output]' % argv[0]
 
