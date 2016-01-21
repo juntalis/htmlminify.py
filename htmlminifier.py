@@ -1,20 +1,60 @@
 #!/usr/bin/env python
-# HTMLMinifier.py v0.2
-#
-# Python reimplementation of:
-# HTMLMinifier.py v0.43
-# http://kangax.github.com/html-minifier/
-#
-# Copyright (c) 2010 Juriy "kangax" Zaytsev
-# Licensed under the MIT license.
+# encoding: utf-8
+"""
+HTMLMinifier.py v0.3
 
-import re
+Python reimplementation of:
+HTMLMinifier.py v0.43
+http://kangax.github.com/html-minifier/
+
+TODO: Not sure why I thought I needed to use the same names/naming
+style as the original js code, but that was a really dumb decision.
+
+This program is free software. It comes without any warranty, to
+the extent permitted by applicable law. You can redistribute it
+and/or modify it under the terms of the Do What The Fuck You Want
+To Public License, Version 2, as published by Sam Hocevar. See
+http://sam.zoy.org/wtfpl/COPYING for more details.
+"""
+import re, warnings
 from lxml import etree
+from httplib import HTTPConnection
+from urllib import urlencode, getproxies, URLopener 
 
-class HtmlMinifier:
+try:
+	import jsmin
+except ImportError:
+	jsmin = None
+	
+	def jsmin_warning():
+		warnings.warn("""
+JS minification is attempted using the jsmin module, which is
+currently missing from your Python environment. As a result,
+minification will be attempted with the online Closure Compiler
+webservice. Should that attempt fail, (which it may - for many
+reasons) the JS will be left in its original form. It is 
+advised that you install this dependency if you want to use
+the functionality. (https://pypi.python.org/pypi/jsmin)
+""")
+
+try:
+	import cssmin
+except ImportError:
+	cssmin = None
+	
+	def cssmin_warning():
+		warnings.warn("""
+CSS minification depends on the cssmin module, which is currently
+missing from your Python environment. This option will be disabled
+for the current minification.
+
+Module URL: https://github.com/zacharyvoase/cssmin
+""")
+
+class HtmlMinifier(object):
 
 	# Our options
-	opts = {
+	DEFAULT_OPTIONS = {
 		'removeComments' : True,
 		'removeCommentsFromCDATA' : True,
 		'removeCDATASectionsFromCDATA' : True,
@@ -28,6 +68,8 @@ class HtmlMinifier:
 		'removeEmptyElements' : False,
 		'removeScriptTypeAttributes' : False,
 		'removeStyleLinkTypeAttributes' : False,
+		'minifyJS': True,
+		'minifyCSS': True,
 	}
 
 	# The results of our minification.
@@ -37,7 +79,11 @@ class HtmlMinifier:
 	__stackNoCollapseWhitespace = []
 	__currentChars = ''
 	__currentTag = ''
-
+	__opener = None
+	
+	# Cached regex instances
+	reBlank = re.compile(r"^\s*$")
+	
 	# account for js + html comments (e.g.: //<!--)
 	__reStartDelimiter = {
 		'script' : re.compile(r"^\s*?(?://)?\s*?<!--.*?\n?"),
@@ -53,34 +99,53 @@ class HtmlMinifier:
 		"^(?:class|id|style|title|lang|dir|on(?:focus|blur|change|click|dblclick|mouse(' + '?:down|up|over|move|out)|key(?:press|down|up)))$"
 	)
 
-	def __init__(self, value=None, options=None):
+	def __init__(self, htmltext=None, options=None):
 		"""
-		Constructor. If value is specified, we will
-		immediately minimify it.
+		Constructor. If htmltext is specified, we will
+		immediately minify it.
 		"""
+		self.opts = HtmlMinifier.DEFAULT_OPTIONS.copy()
 		if options is not None:
-			self.opts = dict(self.opts, options)
+			self.opts.update(options)
 
-		# If value is set, let's start it up.
-		if value is not None and len(value) > 0:
-			self.minified = self.minify(value)
+		# Check for the js module when minifyJS is
+		# specified. Issue a warning if it's missing.
+		if self.opts['minifyJS'] and jsmin is None:
+			jsmin_warning()
+		
+		# Check for the cssmin module when minifyCSS is
+		# specified. Issue a warning and disable the option
+		# if it cannot be found.
+		if self.opts['minifyCSS'] and cssmin is None:
+			self.opts['minifyCSS'] = False
+			cssmin_warning()
+		
+		# If htmltext is set, let's start it up.
+		if htmltext is not None and len(htmltext) > 0:
+			self.minified = self.minify(htmltext)
 
 	def __trimWhitespace(self, val):
-		return val.strip('\n\r\t ')
+		""" Why the hell did I make this  a method? Typing
+		self.__trimWhitespace(text) takes more characters
+		to write than text.strip() """
+		return val.strip()
 
 	def __collapseWhitespace(self, str):
-		return re.sub(r"\s+", " ", str)
+		return re.sub(r"\s{2,}", " ", str)
 
 	def __isConditionalComment(self, text):
-		return True if re.match(r"\[if[^\]]+\]\Z", text) else False
+		return bool(re.match(r"\[if[^\]]+\]\Z", text))
 
 	def __isEventAttribute(self, name):
-		return re.match(r"^on[a-z]+\Z", name)
+		return bool(re.match(r"^on[a-z]+\Z", name))
 
 	def __canRemoveAttributeQuotes(self, val):
-		return True if re.match("^[a-zA-Z0-9-._:]+$", val) else False
+		return bool(re.match("^[a-zA-Z0-9-._:]+$", val))
 
 	def __attributesInclude(self, attrs, check):
+		""" TODO: Check if whatever's used for attribute collections
+		is case-sensitive when it comes to attribute names. Repeatedly
+		iterating the attribute set for every attribute is awful. """
 		for attr in attrs:
 			if attr.name.lower() == check:
 				return True
@@ -103,7 +168,7 @@ class HtmlMinifier:
 		return (tag=='style' or tag=='link') and name=='type' and val=='text/css'
 
 	def __isBooleanAttribute(self, name):
-		return True if re.match(r"(?:^(?:checked|disabled|selected|readonly)$)\Z", name) else False
+		return bool(re.match(r"(?:^(?:checked|disabled|selected|readonly)$)\Z", name))
 
 	def __isUriTypeAttribute(self, name, tag):
 		return	(re.match(r"(?:^(?:a|area|link|base)$)\Z", tag) and name=='href') or\
@@ -159,10 +224,10 @@ class HtmlMinifier:
 		return tag != 'textarea'
 
 	def __canCollapseWhitespace(self, tag):
-		return True if not re.match(r"(?:^(?:script|style|pre|textarea)$)\Z", tag) else False
+		return bool(not re.match(r"(?:^(?:script|style|pre|textarea)$)\Z", tag))
 
 	def __canTrimWhitespace(self, tag):
-		return True if not re.match(r"(?:^(?:pre|textarea)$)\Z", tag) else False
+		return bool(not re.match(r"(?:^(?:pre|textarea)$)\Z", tag))
 
 	def __normalizeAttribute(self, curr, attrs, tag):
 		# Store the name and value of the attribute
@@ -187,12 +252,101 @@ class HtmlMinifier:
 			frag = name + '=' + val
 		return ' ' + frag
 
+	@staticmethod
+	def read_asset(self, url):
+		""" Open using a lazy initialized URLopener instance.
+		TODO: URLopener is apparently flakey. Need to change to urllib2 or 
+		something more stable. """
+		if HtmlMinifier.__opener is None:
+			HtmlMinifier.__opener = URLopener()
+			HtmlMinifier.__opener.addheader('Accept', '*/*')
+		
+		# Can't use a with statement with URLopener stuff. ):
+		cssfile = HtmlMinifier.__opener.open(url)
+		csscode = cssfile.read()
+		cssfile.close()
+		return csscode
+
+	@staticmethod
+	def cssmin(css_code=None, css_url=None):
+		""" Pretty much just a pass-through to cssmin.cssmin """
+		if css_url is not None:
+			css_code = HtmlMinifier.read_asset(css_url)
+		elif css_code is None:
+			raise ValueError('Must specify a value for either css_code or css_url')
+		return cssmin.cssmin(css_code)
+
+	@staticmethod
+	def jsmin(js_code=None, js_url=None):
+		""" Compile js_code using the jsmin module. If it'seek
+		missing, fall back on the Google Closure Compiler service
+		found at http://closure-compiler.appspot.com If that fails,
+		just leave the javascript as is. """
+		use_jsmin = jsmin is not None
+		
+		# Param presets for the Closure Compiler Service
+		params = [
+			('output_format', 'text'),
+			('output_info', 'compiled_code'),
+			('compilation_level', 'SIMPLE_OPTIMIZATIONS'),
+		]
+		
+		# Figure out if we're using a url or the js source itself
+		if js_url is not None:
+			if use_jsmin:
+				js_code = HtmlMinifier.read_asset(js_url)
+			else:
+				params.append(('code_url', js_url))
+		elif js_code is None:
+			raise ValueError('Must specify a value for either js_code or js_url')
+		else:
+			# Unused if we go the jsmin route but oh well.
+			params.append(('js_code', js_code))
+		
+		# Use jsmin if we got it. Otherwise
+		if use_jsmin:
+			return jsmin.jsmin(js_code)
+		
+		# Always use the following headers
+		headers = {
+			'Accept': 'text/javascript,*/*',
+			#'Accept-Encoding': 'gzip, deflate',
+			'Referer': 'http://closure-compiler.appspot.com/home',
+			'Content-type': 'application/x-www-form-urlencoded;charset=utf-8',
+			'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64; rv:43.0) Gecko/20100101 Firefox/43.0',
+		}
+		
+		connection = HTTPConnection('closure-compiler.appspot.com')
+		connection.request('POST', '/compile', urlencode(params), headers)
+		response = connection.getresponse()
+		data = response.read()
+		connection.close()
+		
+		# The Closure Compiler services uses a successful status code
+		# even when it errors out, so we need to check if the body
+		# contains text and doesn't contain an error message.
+		if data.startswith('Error(') or HtmlMinifier.reBlank.match(data):
+			if js_code is None:
+				js_code = HtmlMinifier.read_asset(js_url)
+			data = js_code
+		
+		return data
+
+	def _handle_cdata(self, text):
+		""" Common handling for inline scripts and styles. """
+		if self.opts['removeCommentsFromCDATA']:
+			text = self.__removeComments(text, self.__currentTag)
+		if self.opts['removeCDATASectionsFromCDATA']:
+			text = self.__removeCDATASections(text)
+		return text
+	
 	def start(self, tag, attrs):
 		"""
 		Deal with a starting tag.
 		"""
 		tag = tag.lower()
 		self.__currentTag = tag
+		self.__currentAttrs = attrs
 		self.__currentChars = ''
 
 		# White space management
@@ -210,10 +364,22 @@ class HtmlMinifier:
 			self.__buffer.append(self.__normalizeAttribute(attr, attrs, tag))
 		self.__buffer.append('>')
 
-#	def __unaryElement(self, tag, attrs):
-#		print tag
-#
 	def end(self, tag):
+		# Process all of the collected text data
+		text = self.__currentChars
+		if self.__currentTag == 'script':
+			text = self._handle_cdata(text)
+			if self.opts['minifyJS'] and not HtmlMinifier.reBlank.match(text):
+				if self.__currentAttrs is None or not ('src' in self.__currentAttrs):
+					text = HtmlMinifier.jsmin(text)
+		elif self.__currentTag == 'style':
+			text = self._handle_cdata(text)
+			if self.opts['minifyCSS'] and not HtmlMinifier.reBlank.match(text):
+				text = HtmlMinifier.cssmin(text)
+		
+		self.__currentChars = text
+		self.__buffer.append(text)
+		
 		if self.opts['collapseWhitespace']:
 			if len(self.__stackNoTrimWhitespace) and tag == self.__stackNoTrimWhitespace[len(self.__stackNoTrimWhitespace) - 1]:
 				self.__stackNoTrimWhitespace.pop()
@@ -241,19 +407,15 @@ class HtmlMinifier:
 		self.__currentChars = ''
 
 	def data(self, text):
-		if self.__currentTag == 'script' or self.__currentTag == 'style':
-			if self.opts['removeCommentsFromCDATA']:
-				text = self.__removeComments(text, self.__currentTag)
-			if self.opts['removeCDATASectionsFromCDATA']:
-				text = self.__removeCDATASections(text)
+		""" Process an element's inner text """
+		if text is None: return
 		if self.opts['collapseWhitespace']:
 			if not len(self.__stackNoTrimWhitespace) and self.__canTrimWhitespace(self.__currentTag):
 				text = self.__trimWhitespace(text)
 			if not len(self.__stackNoCollapseWhitespace) and self.__canCollapseWhitespace(self.__currentTag):
 				text = self.__collapseWhitespace(text)
 
-		self.__currentChars = text
-		self.__buffer.append(text)
+		self.__currentChars += text
 
 	def comment(self, text):
 		if self.opts['removeComments']:
@@ -277,13 +439,13 @@ class HtmlMinifier:
 	def close(self):
 		return ''
 
-	def minify(self, value, options=None):
+	def minify(self, htmltext, options=None):
 		# Set the new options.
 		if options is not None: self.opts = dict(self.opts, options)
 
-		# Verify value
-		if value is None or len(value) == 0:
-			raise Exception('Invalid value specified for minification. Must be a string larger than 0 characters.')
+		# Verify htmltext
+		if htmltext is None or len(htmltext) == 0:
+			raise ValueError('Invalid value specified for parameter: htmltext. Must be a string larger than 0 characters.')
 
 		# Reset the buffers.
 		self.__buffer = []
@@ -291,12 +453,13 @@ class HtmlMinifier:
 		self.__stackNoCollapseWhitespace = []
 		self.__currentChars = ''
 		self.__currentTag = ''
+		self.__currentAttrs = None
 
 		# Until I can figure out how to access the actual doctype string when
 		# using a custom parser..
 		self.__doctype('<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">')
 		p = etree.HTMLParser(target = self)
-		tree = etree.fromstring(value,parser=p)
+		tree = etree.fromstring(htmltext, parser=p)
 
 		# Iterate and add buffer to results.
 		for c in self.__buffer: self.__results.append(c)
@@ -315,17 +478,30 @@ class HtmlMinifier:
 					c = c[0]
 			if len(c) > 0:
 				results.append(c)
-		results = "".join(results)
+		results = ''.join(results)
 		return results
 
 if __name__ == '__main__':
-	from sys import argv
-	if len(argv) > 1:
-		min = HtmlMinifier(value=open(argv[1]).read())
-		if len(argv) == 3:
-			open(argv[2],'w').write(min.minified)
+	import sys
+	
+	if len(sys.argv) > 1:
+		# Read input
+		htmlfile = open(sys.argv[1], 'rt')
+		htmlcode = htmlfile.read()
+		htmlfile.close()
+		
+		# Minify code
+		htmlmin = HtmlMinifier(htmlcode)
+		
+		# Figure out the output
+		outfile = None
+		if len(sys.argv) > 2:
+			outfile = open(sys.argv[2], 'w')
 		else:
-			print min.minified
+			outfile = sys.stdout
+		
+		# Write contents and close
+		outfile.write(htmlmin.minified)
+		outfile.close()
 	else:
-		print 'Usage: %s input [output]' % argv[0]
-
+		print 'Usage: %s input [output]' % sys.argv[0]

@@ -1,6 +1,5 @@
 #/usr/bin/env python
 from pyquery import PyQuery as pq
-import closure as js
 import htmlminifier as html
 import cssmin as css
 from os import path, getcwd
@@ -27,6 +26,33 @@ def inline(element):
 	"""
 	return pq(element).text()
 
+def minify_js(js_code=None, js_url=None):
+	""" Compile js_code using the Google Closure Compiler service
+	found at http://closure-compiler.appspot.com """
+	
+	# Param presets
+	params = {
+		'output_format': 'text',
+		'output_info': 'compiled_code',
+		'compilation_level': 'SIMPLE_OPTIMIZATIONS',
+	}
+	
+	# Figure out if we're using a url or the js source itself
+	if js_code is not None:
+		params['js_code'] = js_code
+	elif js_url is not None:
+		params['code_url'] = js_url
+	else:
+		raise ValueError('Must specify a value for either js_code or js_url')
+	# Always use the following value for the Content-type header.
+	headers = { 'Content-type': 'application/x-www-form-urlencoded' }
+	connection = HTTPConnection('closure-compiler.appspot.com')
+	connection.request('POST', '/compile', urlencode(params), headers)
+	response = connection.getresponse()
+	data = response.read()
+	connection.close()
+	return data
+
 def process_js(filedir, scripts):
 	if not len(scripts): return None
 	result = ''
@@ -49,12 +75,8 @@ def process_js(filedir, scripts):
 					print 'Script: %s' % url
 					result += open(url).read()
 	if not len(result): return None
-	options = js.Options()
-	options['jscode'] = result
-	options['level'] = js.levelCoerce('simple')
-	options['info'] = js.infoCoerce('compiled_code')
-	result = js.compile(options)
-	result = result.strip('\r\n \t')
+	
+	result = minify_js(result).strip('\r\n \t')
 	if not len(result): return None
 	return result
 

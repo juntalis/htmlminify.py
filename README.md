@@ -1,8 +1,11 @@
+## Note
+This was something I wrote for shits and giggles when I was still familiarizing myself with Python. It was written as a direct translation of kangax's JavaScript code to Python, and no thought was given to redesigning it for the new language. (Even the original naming scheme was retained until I murdered the consistency with updates using the Python naming style) As a result, it has awful performance, hideous source, and should never be used for any sort of production-level work.
+
 HtmlMinify.py
 =============
 Update: Changed the html parser to [LXML](http://lxml.de/). Should work a lot better now.
 
-I needed a quick little python script for minimizing html that I could easily integrate into the build script of a project I was working on. Since the only usable thing I could find at the time was [kangax's js script](https://github.com/kangax/html-minifier/ "kangax / html-minifier"), I went to work converting his over to python. 
+I needed a quick little python script for minimizing html that I could easily integrate into the build script of a project I was working on. (*Never actually used it in said build script or ever again after writing it*) Since the only usable thing I could find at the time was [kangax's js script](https://github.com/kangax/html-minifier/ "kangax / html-minifier"), I went to work converting his over to python. 
 
 I had to make a few changes to some of the existing regular expressions, due to some funky effects when dealing with unclean html, but it shouldn't affect the end size too much. Let me know if you notice anything off.
 
@@ -10,6 +13,7 @@ All credit goes to him, since the entire script's logic down to the regular expr
 
 Singlize.py
 ===========
+Probably broken after the updates.
 
 Usage
 -----
